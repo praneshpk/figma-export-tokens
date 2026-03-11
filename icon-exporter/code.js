@@ -1,3 +1,4 @@
+// Show UI
 figma.showUI(__html__, { width: 400, height: 320 });
 
 figma.ui.onmessage = async function (msg) {
@@ -14,8 +15,7 @@ figma.ui.onmessage = async function (msg) {
       return;
     }
 
-    // Collect direct children of each selected group/frame.
-    // If a non-container node is selected directly, include it as-is.
+    // Collect direct children of each selected group/frame
     var nodes = [];
     for (var s = 0; s < selection.length; s++) {
       var sel = selection[s];
@@ -36,13 +36,16 @@ figma.ui.onmessage = async function (msg) {
       return;
     }
 
+    // Deduplicate by smallest size if SVG
+    if (format === "SVG") {
+      nodes = dedupeBySmallestSize(nodes);
+    }
+
     var files = [];
 
     for (var i = 0; i < nodes.length; i++) {
       var node = nodes[i];
-
-      var filename = buildFilename(node) || sanitize(node.name);
-
+      var filename = buildFilename(node, format === "SVG");
       var ext = format.toLowerCase();
       var settings = {
         format: format,
@@ -51,6 +54,7 @@ figma.ui.onmessage = async function (msg) {
 
       try {
         var bytes = await node.exportAsync(settings);
+
         files.push({ name: filename + "." + ext, bytes: Array.from(bytes) });
       } catch (e) {
         figma.ui.postMessage({
@@ -63,22 +67,22 @@ figma.ui.onmessage = async function (msg) {
 
     var zipName =
       selection.length === 1 ? sanitize(selection[0].name) : "icons";
-    figma.ui.postMessage({ type: "download", files: files, zipName: zipName });
+    figma.ui.postMessage({ type: "download", files: files, zipName });
   }
 
-  if (msg.type === "cancel") {
-    figma.closePlugin();
-  }
-
-  if (msg.type === "done") {
+  if (msg.type === "cancel" || msg.type === "done") {
     figma.closePlugin();
   }
 };
 
-function buildFilename(node) {
+// ----------------------
+// Helpers
+// ----------------------
+
+function buildFilename(node, isSvg) {
   var name = node.name;
 
-  // If it looks like a variant name ("Name=Arrow, Size=16"), extract just the values
+  // Variant format: "Name=Arrow, Size=16"
   if (name.indexOf("=") !== -1) {
     var parts = name.split(",");
     var values = [];
@@ -86,15 +90,78 @@ function buildFilename(node) {
       var pair = parts[i].trim().split("=");
       if (pair.length === 2) values.push(pair[1].trim());
     }
-    if (values.length) return sanitize(values.join("-"));
+    if (values.length) {
+      var filename = values.join("-");
+      // If SVG, strip the last part (assumed to be size)
+      if (isSvg) {
+        var segments = filename.split("-");
+        segments.pop(); // remove last size
+        filename = segments.join("-");
+      }
+      return sanitize(filename).replace(/-$/, ""); // remove trailing dash
+    }
   }
 
   // Plain name — strip leading path segments
-  return sanitize(name.split("/").pop().trim());
+  var baseName = name.split("/").pop().trim();
+  if (isSvg) {
+    // Remove trailing "-<number>" for SVG
+    var match = baseName.match(/^(.+?)[-_]\d+$/);
+    if (match) baseName = match[1];
+  }
+  return sanitize(baseName).replace(/-$/, ""); // remove trailing dash
+}
+
+function extractNameAndSize(node) {
+  var name = node.name;
+  var iconName = null;
+  var size = Infinity;
+
+  // Variant property format
+  if (name.indexOf("=") !== -1) {
+    var props = parseVariantName(name);
+    iconName = props["Name"] || null;
+    var sizeVal = parseInt(props["Size"], 10);
+    if (!isNaN(sizeVal)) size = sizeVal;
+  }
+
+  // Suffix format: "arrow-16" or plain "arrow"
+  if (!iconName) {
+    var match = name.match(/^(.+?)[-_](\d+)$/);
+    if (match) {
+      iconName = match[1].trim();
+      size = parseInt(match[2], 10);
+    } else {
+      iconName = name;
+    }
+  }
+
+  return { iconName: iconName.toLowerCase(), size: size };
+}
+
+function dedupeBySmallestSize(nodes) {
+  var best = {}; // iconName → { node, size }
+
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i];
+    var extracted = extractNameAndSize(node);
+    var key = extracted.iconName;
+    var size = extracted.size;
+
+    if (!best[key] || size < best[key].size) {
+      best[key] = { node: node, size: size };
+    }
+  }
+
+  var result = [];
+  var keys = Object.keys(best);
+  for (var k = 0; k < keys.length; k++) {
+    result.push(best[keys[k]].node);
+  }
+  return result;
 }
 
 function parseVariantName(name) {
-  // Parses "Name=Arrow, Size=16" → { Name: "Arrow", Size: "16" }
   var props = {};
   var parts = name.split(",");
   for (var i = 0; i < parts.length; i++) {
@@ -107,5 +174,5 @@ function parseVariantName(name) {
 }
 
 function sanitize(str) {
-  return str.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-");
+  return str.replace(/[^a-zA-Z0-9._()-]/g, "-").replace(/-+/g, "-");
 }
